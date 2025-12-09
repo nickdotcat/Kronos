@@ -8,6 +8,9 @@ from .metrics import (
     max_drawdown,
     trade_stats,
     precision_metrics,
+    profit_factor,
+    coverage,
+    confidence_buckets,
 )
 
 
@@ -30,6 +33,8 @@ def run_backtest(
     allow_short: bool = False,
     delay: int = 0,
     bars_per_year: float = 252,
+    prob_up: np.ndarray = None,
+    prob_down: np.ndarray = None,
 ) -> Dict[str, Any]:
     """
     Simple vectorized backtest.
@@ -92,6 +97,13 @@ def run_backtest(
     }
     metrics.update(trade_stats(trade_returns))
     metrics.update(precision_metrics(position, pnl))
+    metrics["profit_factor"] = profit_factor(pnl)
+    metrics["coverage"] = coverage(signals)
+
+    if prob_up is not None and prob_down is not None:
+        # use max of directional prob as confidence
+        conf = np.maximum(prob_up, prob_down)
+        metrics.update(confidence_buckets(conf, pnl))
 
     return {
         "equity_curve": equity,

@@ -63,4 +63,46 @@ def precision_metrics(
         "precision_down_net": _precision(down_mask),
         "strict_wrong_up_loss": float(strict_wrong_up.mean()) if strict_wrong_up.size else 0.0,
         "strict_wrong_down_loss": float(strict_wrong_down.mean()) if strict_wrong_down.size else 0.0,
+        "strict_wrong_up_count": int(strict_wrong_up.size),
+        "strict_wrong_down_count": int(strict_wrong_down.size),
     }
+
+
+def profit_factor(per_bar_pnl: np.ndarray) -> float:
+    gains = per_bar_pnl[per_bar_pnl > 0].sum()
+    losses = -per_bar_pnl[per_bar_pnl < 0].sum()
+    if losses == 0:
+        return float("inf") if gains > 0 else 0.0
+    return float(gains / losses)
+
+
+def coverage(signals: np.ndarray) -> float:
+    if signals.size == 0:
+        return 0.0
+    return float((signals != 0).mean())
+
+
+def confidence_buckets(
+    probs: np.ndarray,
+    per_bar_pnl: np.ndarray,
+    n_bins: int = 5,
+) -> Dict[str, float]:
+    """
+    Bucket PnL by confidence deciles/quantiles, returning avg pnl per bucket.
+    """
+    if probs.size == 0 or per_bar_pnl.size == 0:
+        return {}
+    quantiles = np.linspace(0, 1, n_bins + 1)
+    bins = np.quantile(probs, quantiles)
+    # ensure monotonic
+    bins[0] = min(bins[0], probs.min())
+    bins[-1] = max(bins[-1], probs.max())
+    labels = []
+    stats = {}
+    for i in range(n_bins):
+        lo, hi = bins[i], bins[i + 1]
+        mask = (probs >= lo) & (probs <= hi if i == n_bins - 1 else probs < hi)
+        key = f"bucket_{i}_{lo:.3f}_{hi:.3f}"
+        labels.append(key)
+        stats[key] = float(per_bar_pnl[mask].mean()) if mask.any() else 0.0
+    return stats

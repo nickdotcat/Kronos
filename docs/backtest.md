@@ -11,9 +11,9 @@
 - `backtest/predictor_runner.py`：封装 `KronosPredictor` 多次抽样生成 MC 价格 `(mc_samples, pred_len, feat)`。  
 - `backtest/signal.py`：收益样本 → 三分类信号（阈值+置信度，支持/禁用做空）。  
 - `backtest/engine.py`：回测引擎，支持执行延迟、多空、买卖成本；用 close pct_change 估算收益，输出资金曲线与指标。  
-- `backtest/metrics.py`：年化收益、夏普、最大回撤、平均单笔收益、胜率、precision_up/down、严格错误损失。  
+- `backtest/metrics.py`：年化收益、夏普、最大回撤、平均单笔收益、胜率、precision_up/down、严格错误损失/次数、profit factor、coverage、置信度分桶均值。  
 - `backtest/grid_search.py`：遍历 up/down/conf 组合，生成信号→回测→汇总指标 DataFrame。  
-- 示例：`examples/backtest_stock.py`（日线 T+1 长多）、`examples/backtest_etf.py`（30m T+0 多空）。
+- 示例：`examples/backtest_stock.py`（日线 T+1 长多）、`examples/backtest_etf.py`（30m T+0 多空）、`examples/grid_search_demo.py`（阈值扫描演示）。
 
 ## 数据与依赖
 - 依赖见 `requirements.txt`；需加载 `NeoQuasar/Kronos-small` 与 `NeoQuasar/Kronos-Tokenizer-base`（离线请预缓存）。  
@@ -28,19 +28,21 @@
     - `T/top_p/top_k`：采样温度、核采样、Top-K 采样控制生成随机性。  
   - `predict_mc(df, x_timestamp, y_timestamp, pred_len, mc_samples)` → `(samples, mean_path)`；`mc_samples` 为抽样次数，`pred_len` 为预测步数（示例使用 1）。
 - `compute_step_return_samples(mc_samples, last_close, step=0)`：用预测 close 与 `last_close` 计算第 `step` 步收益样本 `(mc_samples,)`。
-- `classify_mc_returns(ret_samples, up_thresh, down_thresh, conf_thresh, allow_short)`：  
+- `classify_mc_returns(ret_samples, up_thresh, down_thresh, conf_thresh, allow_short, use_thresh_prob=True)`：  
   - `ret_samples` 形状 `(n_steps, mc_samples)`；  
   - `up_thresh/down_thresh`：期望收益阈值（正/负）；  
   - `conf_thresh`：方向概率阈值；  
-  - `allow_short`：是否允许输出 -1 信号。  
+  - `allow_short`：是否允许输出 -1 信号；  
+  - `use_thresh_prob`：置信度为超阈值概率（默认）或简单正/负概率。  
   - 返回 `(signals, prob_up, prob_down)`，`signals` 形状 `(n_steps,)`，取值 {-1,0,1}。
-- `run_backtest(close, signals, buy_fee, sell_fee, allow_short, delay, bars_per_year)`：  
+- `run_backtest(close, signals, buy_fee, sell_fee, allow_short, delay, bars_per_year, prob_up=None, prob_down=None)`：  
   - `close`：与 `signals` 对齐的收盘价序列；  
   - `buy_fee/sell_fee`：买卖比例成本（如 0.001=0.1%）；  
   - `allow_short`：允许空头；  
   - `delay`：信号执行延迟（1 表示 T+1）；  
   - `bars_per_year`：年化因子（日线 252，30m 约 252*8）。  
-  - 返回 `{equity_curve, per_bar_pnl, position, metrics}`。
+  - `prob_up/prob_down`：可选，传入以输出置信度分桶指标。  
+  - 返回 `{equity_curve, per_bar_pnl, position, metrics}`，metrics 额外包含 profit_factor、coverage、严格错误次数、置信度分桶均值。
 - `grid_search(mc_ret_samples, close, up_thresh_list, down_thresh_list, conf_thresh_list, allow_short, delay, buy_fee, sell_fee, bars_per_year)`：对阈值组合遍历，返回指标 DataFrame（按年化收益降序）。
 
 ## 通用步骤
@@ -50,6 +52,20 @@
 4. 信号：`signals, prob_up, prob_down = classify_mc_returns(mc_ret_samples, up_thresh, down_thresh, conf_thresh, allow_short)`；A 股 `allow_short=False`，ETF `allow_short=True`。  
 5. 回测：`run_backtest(close_series, signals, buy_fee, sell_fee, allow_short, delay, bars_per_year)`；A 股 `delay=1, bars_per_year=252`；ETF 30m `delay=0, bars_per_year≈252*8`。  
 6. 网格搜索（可选）：调用 `grid_search(...)` 传阈值列表，对比指标。
+
+## 网格搜索示例
+```bash
+python examples/grid_search_demo.py \
+  --data ./data/your_etf_30m.csv \
+  --lookback 256 \
+  --mc_samples 6 \
+  --up_list 0.0005,0.0008,0.001 \
+  --down_list 0.0005,0.0008,0.001 \
+  --conf_list 0.55,0.6,0.65 \
+  --allow_short \
+  --device cuda:0
+```
+- 支持传 `delay`（T+1 则设 1）、`bars_per_year`、`buy_fee/sell_fee`。输出按年化收益排序的前 10 组。
 
 ## 示例与参数
 ### 日线 A 股（T+1，长多）
@@ -94,4 +110,5 @@ python examples/backtest_etf.py \
 - 现用“下一根 close 收益”驱动信号与执行，如需开盘成交、涨跌停过滤、滑点或固定手续费，可在 `backtest/engine.py` 调整。  
 - MC 抽样为多次单样本预测，耗时随样本数线性增长，可调 `T/top_p/top_k` 控制随机性。  
 - 可扩展多步预测或多资产批量：提升 `pred_len` 或使用 `KronosPredictor.predict_batch`。  
-- 严格错误指标：`strict_wrong_up_loss/strict_wrong_down_loss` 为对应方向信号但亏损时的平均值（含成本）。***
+- 严格错误指标：`strict_wrong_up_loss/strict_wrong_down_loss` 为对应方向信号但亏损时的平均值（含成本）；`strict_wrong_*_count` 为次数。  
+- 置信度分桶：调用 `run_backtest` 时传入 `prob_up/prob_down`（来自 `classify_mc_returns` 输出），可获得不同置信区间的平均收益。***
